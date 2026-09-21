@@ -14,10 +14,22 @@ def test_yoy_and_ann_to_12m():
     assert T.ann_to_12m(pd.Series(3.0, index=idx)).iloc[-1] == pytest.approx(3.0)
 
 
-def test_quarterly_to_monthly_ffills_two_months():
+def test_quarterly_to_monthly_ffills_within_a_quarter():
     idx = pd.date_range("2020-03-31", periods=4, freq="QE")
     m = T.to_monthly(pd.Series([1, 2, 3, 4.0], index=idx), native_freq="Quarterly")
     assert m.loc["2020-05-31"] == 1 and m.loc["2020-06-30"] == 2
+
+
+def test_quarterly_to_monthly_survives_one_missing_quarter():
+    # a genuinely missing quarter (real FRED gap, e.g. ECI) used to leave a
+    # mid-history NaN hole under ffill(limit=2); limit=3 closes one more
+    # month of it without becoming interpolation (still a strict ffill).
+    idx = pd.to_datetime(["2018-01-01", "2018-04-01", "2018-10-01",  # 2018Q3 missing
+                          "2019-01-01"])
+    s = pd.Series([100.0, 101.0, 103.0, 104.0], index=idx)
+    m = T.to_monthly(s, native_freq="Quarterly")
+    assert m.loc["2018-09-30"] == 101.0          # now covered (was NaN under limit=2)
+    assert m.loc["2018-10-31":"2018-11-30"].isna().all()  # a 5-month gap still isn't fully bridged
 
 
 def test_expanding_z_has_no_lookahead():
@@ -104,10 +116,16 @@ def test_validation_runs_on_committed_gate(tmp_path):
         committed_by="test")))
     s = yaml.safe_load(open("config/settings.yaml"))
     r = V.run(inp, tgt, s, gate_path=g)
-    assert r["composite_label"] in ("SIGNAL", "DESCRIPTIVE")
+    assert r["composite_label"] in ("SIGNAL", "DESCRIPTIVE", "UNDERPOWERED")
     assert "syn_market_1" not in r["inputs_used"]
     assert len(r["gate_sha256"]) == 64
     assert r["benchmark"] == "hist_mean"   # default when gate omits `benchmark`
+    # results_own is per-method context and not bounded by the common sample;
+    # results_common (the decision-grade comparison) can only be <= each method's own n
+    assert set(r["results_own"]) == set(r["results_common"]) == {"zscore_avg", "ltm_0_5", "pca_pc1"}
+    for m in r["results_common"]:
+        assert r["results_common"][m]["n_oos"] <= r["results_own"][m]["n_oos"]
+    assert r["n_common"] == min(v["n_oos"] for v in r["results_common"].values())
 
 
 # ------------------------------------------------------------- market benchmark patch
@@ -153,19 +171,86 @@ def test_build_target_fedfunds_change():
     assert np.isnan(out.iloc[-1])
 
 
+def _market_gate_dict(**overrides):
+    g = dict(target="fedfunds_change", horizon_m=6, metric="oos_r2",
+             benchmark="market", pca_promotion_margin=0.02, signal_min_oos_r2=0.02,
+             min_train_months=60, exclude_inputs=["syn_market_1", "syn_market_2"],
+             committed_on="2026-09-21", committed_by="test")
+    g.update(overrides)
+    return g
+
+
 def test_validation_market_benchmark_end_to_end(tmp_path):
     inp, tgt, _ = synthetic.make(240)
     bmk = synthetic.make_benchmarks(tgt.index)
     g = tmp_path / "gate.yaml"
-    g.write_text(yaml.safe_dump(dict(target="fedfunds_change", horizon_m=6, metric="oos_r2",
-        benchmark="market", pca_promotion_margin=0.02, signal_min_oos_r2=0.02,
-        min_train_months=60, exclude_inputs=["syn_market_1", "syn_market_2"],
-        committed_on="2026-09-21", committed_by="test")))
+    g.write_text(yaml.safe_dump(_market_gate_dict()))
     s = yaml.safe_load(open("config/settings.yaml"))
     r = V.run(inp, tgt, s, gate_path=g, benchmarks=bmk)
     assert r["benchmark"] == "market"
+    assert r["composite_label"] in ("SIGNAL", "DESCRIPTIVE", "UNDERPOWERED")
+    assert np.isfinite(r["results_common"]["zscore_avg"]["oos_r2"])
+    assert np.isfinite(r["results_own"]["zscore_avg"]["oos_r2"])
+
+
+# ------------------------------------------------------ Fix A: common-sample comparison
+
+def test_oos_r2_restrict_only_scores_given_dates():
+    idx = pd.date_range("2000-01-31", periods=200, freq="ME")
+    rng = np.random.default_rng(1)
+    x = pd.Series(rng.normal(size=200), index=idx)
+    y = pd.Series(rng.normal(size=200), index=idx)
+    full = V.oos_r2(x, y, h=6, min_train=60)
+    half = V.oos_r2(x, y, h=6, min_train=60, restrict=idx[100:])
+    assert half["n_oos"] < full["n_oos"]
+    assert half["n_oos"] > 0
+
+
+def test_run_flags_underpowered_when_common_sample_is_thin(tmp_path):
+    # PCA needs complete rows across all composite inputs, so on synthetic data
+    # (240m, min_periods=60) its own sample is far smaller than z-avg/L-T-M's —
+    # this reproduces the exact bug the patch describes: a method-vs-method
+    # comparison on mismatched sample sizes flashing a false SIGNAL.
+    inp, tgt, _ = synthetic.make(240)
+    bmk = synthetic.make_benchmarks(tgt.index)
+    g = tmp_path / "gate.yaml"
+    g.write_text(yaml.safe_dump(_market_gate_dict()))  # default min_common_oos=60
+    s = yaml.safe_load(open("config/settings.yaml"))
+    r = V.run(inp, tgt, s, gate_path=g, benchmarks=bmk)
+    assert r["results_own"]["pca_pc1"]["n_oos"] < r["results_own"]["zscore_avg"]["n_oos"]
+    assert r["n_common"] == r["results_common"]["pca_pc1"]["n_oos"]  # PCA is the binding constraint
+    assert r["underpowered"] is True
+    assert r["composite_label"] == "UNDERPOWERED"
+    assert r["pca_promoted"] is False   # UNDERPOWERED blocks promotion outright
+
+
+def test_run_min_common_oos_from_gate_lifts_underpowered_guard(tmp_path):
+    inp, tgt, _ = synthetic.make(240)
+    bmk = synthetic.make_benchmarks(tgt.index)
+    g = tmp_path / "gate.yaml"
+    g.write_text(yaml.safe_dump(_market_gate_dict(min_common_oos=1)))
+    s = yaml.safe_load(open("config/settings.yaml"))
+    r = V.run(inp, tgt, s, gate_path=g, benchmarks=bmk)
+    assert r["underpowered"] is False
     assert r["composite_label"] in ("SIGNAL", "DESCRIPTIVE")
-    assert np.isfinite(r["results"]["zscore_avg"]["oos_r2"])
+
+
+def test_run_eval_start_restricts_common_sample(tmp_path):
+    inp, tgt, _ = synthetic.make(240)
+    bmk = synthetic.make_benchmarks(tgt.index)
+    g = tmp_path / "gate.yaml"
+    g.write_text(yaml.safe_dump(_market_gate_dict(min_common_oos=1)))
+    s = yaml.safe_load(open("config/settings.yaml"))
+    r_full = V.run(inp, tgt, s, gate_path=g, benchmarks=bmk)
+    r_restricted = V.run(inp, tgt, s, gate_path=g, benchmarks=bmk, eval_start="2023-01-01")
+    assert r_restricted["n_common"] < r_full["n_common"]
+    assert r_restricted["eval_start"] == "2023-01-01"
+    assert r_full["eval_start"] is None
+    # CLI --eval-start overrides a gate-level eval_start when both are given
+    g2 = tmp_path / "gate2.yaml"
+    g2.write_text(yaml.safe_dump(_market_gate_dict(min_common_oos=1, eval_start="2015-01-01")))
+    r_override = V.run(inp, tgt, s, gate_path=g2, benchmarks=bmk, eval_start="2023-01-01")
+    assert r_override["eval_start"] == "2023-01-01"
 
 
 class FakePanelClient:

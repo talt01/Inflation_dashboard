@@ -93,17 +93,23 @@ def pca_pc1_expanding(z: pd.DataFrame, min_rows: int) -> pd.Series:
 
 
 def oos_r2(x: pd.Series, y: pd.Series, h: int, min_train: int,
-           benchmark: pd.Series | None = None) -> dict:
+           benchmark: pd.Series | None = None,
+           restrict: pd.DatetimeIndex | None = None) -> dict:
     """benchmark=None -> Campbell-Thompson (expanding historical mean of y).
     benchmark=Series -> the benchmark's own prediction of y at each t (e.g. the
     market-implied policy path, or a zero/"no change" series); OOS R^2 then
-    measures edge over THAT prediction instead of over the historical mean."""
+    measures edge over THAT prediction instead of over the historical mean.
+    restrict=DatetimeIndex -> only SCORE observations dated in `restrict` (the
+    training loop is unchanged); used to compare methods on a common sample,
+    or to restrict to a modern-regime window (see gate `eval_start`)."""
     df = pd.concat([x.rename("x"), y.rename("y")], axis=1)
     if benchmark is not None:
         df = df.join(benchmark.rename("bmk"))
     dates = df.index
     preds, bench, actual = [], [], []
     for i in range(len(dates)):
+        if restrict is not None and dates[i] not in restrict:
+            continue
         if pd.isna(df["x"].iloc[i]) or pd.isna(df["y"].iloc[i]):
             continue
         train = df.iloc[: max(i - h + 1, 0)].dropna(subset=["x", "y"])   # s + h <= t
@@ -122,16 +128,20 @@ def oos_r2(x: pd.Series, y: pd.Series, h: int, min_train: int,
         preds.append(a + b * df["x"].iloc[i])
         actual.append(df["y"].iloc[i])
     if not actual:
-        return {"oos_r2": np.nan, "n_oos": 0}
+        return {"oos_r2": np.nan, "n_oos": 0, "effective_n": 0}
     p, bm, yv = map(np.asarray, (preds, bench, actual))
+    n_oos = int(len(yv))
     return {"oos_r2": float(1 - ((yv - p) ** 2).sum() / ((yv - bm) ** 2).sum()),
             "rmse_ratio": float(np.sqrt(((yv - p) ** 2).mean() / ((yv - bm) ** 2).mean())),
-            "n_oos": int(len(yv))}
+            "n_oos": n_oos,
+            # overlapping h-month windows -> observations are autocorrelated;
+            # a crude "how many independent points is this really" note.
+            "effective_n": round(n_oos / h, 1)}
 
 
 def run(inputs: pd.DataFrame, targets: pd.DataFrame, settings: dict,
         gate_path="config/gate.yaml", vintage_policy="latest",
-        benchmarks: pd.DataFrame | None = None) -> dict:
+        benchmarks: pd.DataFrame | None = None, eval_start: str | None = None) -> dict:
     gate, gate_hash = load_gate(gate_path)
     h, mt = int(gate["horizon_m"]), int(gate["min_train_months"])
     X = inputs.drop(columns=[c for c in gate.get("exclude_inputs", []) if c in inputs])
@@ -155,20 +165,54 @@ def run(inputs: pd.DataFrame, targets: pd.DataFrame, settings: dict,
     else:
         bench_series = None   # hist_mean (Campbell-Thompson, original behaviour)
 
-    res = {m: oos_r2(s, y, h, mt, benchmark=bench_series) for m, s in
-           {"zscore_avg": comp, "ltm_0_5": ltm, "pca_pc1": pc1}.items()}
+    methods = {"zscore_avg": comp, "ltm_0_5": ltm, "pca_pc1": pc1}
 
-    margin = res["pca_pc1"]["oos_r2"] - res["zscore_avg"]["oos_r2"]
-    promote = bool(margin >= gate["pca_promotion_margin"])
+    # own-sample: context only, NOT comparable across methods — z-avg/L-T-M
+    # average over whatever indicators are present so they reach back decades;
+    # PCA needs complete rows, so it only starts once the latest-starting
+    # composite indicator has data. Scoring each method on its own max sample
+    # and then comparing head-to-head is apples-to-oranges.
+    results_own = {m: oos_r2(s, y, h, mt, benchmark=bench_series) for m, s in methods.items()}
+
+    # common sample: the fair, decision-grade comparison — dates where the
+    # target AND all three predictors are non-NaN. `eval_start` (CLI arg,
+    # falling back to the gate's `eval_start`) further restricts it to a
+    # modern-regime window, e.g. to re-test a lead found on the full history.
+    common = y.dropna().index
+    for s in methods.values():
+        common = common.intersection(s.dropna().index)
+    eval_start = eval_start or gate.get("eval_start")
+    if eval_start:
+        common = common[common >= pd.Timestamp(eval_start)]
+    results_common = {m: oos_r2(s, y, h, mt, benchmark=bench_series, restrict=common)
+                      for m, s in methods.items()}
+
+    n_common = min(r["n_oos"] for r in results_common.values())
+    min_common = int(gate.get("min_common_oos", 60))
+    underpowered = n_common < min_common
+
+    # all decisions (promotion, SIGNAL label) use results_common, never results_own
+    margin = results_common["pca_pc1"]["oos_r2"] - results_common["zscore_avg"]["oos_r2"]
+    promote = (not underpowered) and bool(margin >= gate["pca_promotion_margin"])
     production = "pca_pc1" if promote else "zscore_avg"
-    label = "SIGNAL" if res[production]["oos_r2"] >= gate["signal_min_oos_r2"] else "DESCRIPTIVE"
+    if underpowered:
+        label = "UNDERPOWERED"
+    else:
+        label = ("SIGNAL" if results_common[production]["oos_r2"] >= gate["signal_min_oos_r2"]
+                 else "DESCRIPTIVE")
 
     return {"run_at": dt.datetime.now().isoformat(timespec="seconds"),
             "gate": gate, "gate_sha256": gate_hash, "vintage_policy": vintage_policy,
-            "benchmark": bmode, "inputs_used": list(X.columns), "results": res,
+            "benchmark": bmode, "eval_start": str(eval_start) if eval_start else None,
+            "inputs_used": list(X.columns),
+            "results_own": results_own, "results_common": results_common,
+            "n_common": int(n_common), "min_common_oos": min_common,
+            "underpowered": underpowered,
             "pca_minus_zavg": float(margin), "pca_promoted": promote,
             "production_method": production, "composite_label": label,
-            "caveat": "Overlapping forward targets -> autocorrelated errors; no SEs reported."}
+            "caveat": "Overlapping forward targets -> autocorrelated errors; no SEs reported. "
+                     "results_own is per-method sample context only, NOT comparable across "
+                     "methods; all decisions use results_common (the common-sample comparison)."}
 
 
 def save(result: dict, out_dir="outputs") -> Path:

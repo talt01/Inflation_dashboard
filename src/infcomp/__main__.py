@@ -96,6 +96,9 @@ def main(argv=None):
                     help="validate: shift inputs by publication lag")
     ap.add_argument("--vintage", default=None,
                     help="ALFRED realtime_end (YYYY-MM-DD) for point-in-time data")
+    ap.add_argument("--eval-start", default=None,
+                    help="validate: restrict OOS scoring to dates >= this (YYYY-MM-DD); "
+                         "overrides gate.yaml's eval_start if both are set")
     a = ap.parse_args(argv)
     s = _settings()
 
@@ -118,10 +121,15 @@ def main(argv=None):
     elif a.cmd == "validate":
         inputs, targets, benchmarks, _ = _load_panel(s, pit=a.pit, realtime_end=a.vintage)
         policy = f"{'vintage ' + a.vintage if a.vintage else 'latest'}" + (" + pub-lag" if a.pit else "")
-        res = V.run(inputs, targets, s, vintage_policy=policy, benchmarks=benchmarks)
+        res = V.run(inputs, targets, s, vintage_policy=policy, benchmarks=benchmarks,
+                    eval_start=a.eval_start)
         print(f"Saved {V.save(res, s['output_dir'])}")
-        print(json.dumps({k: res[k] for k in ("results", "pca_promoted", "production_method",
-                                              "composite_label", "benchmark")}, indent=2))
+        print(json.dumps({k: res[k] for k in ("results_common", "n_common", "min_common_oos",
+                                              "underpowered", "pca_promoted", "production_method",
+                                              "composite_label", "benchmark", "eval_start")},
+                         indent=2))
+        print("\n(results_own — per-method sample context, NOT comparable across methods):")
+        print(json.dumps(res["results_own"], indent=2))
 
     elif a.cmd == "demo":
         from . import synthetic

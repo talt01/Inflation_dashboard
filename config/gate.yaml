@@ -28,10 +28,21 @@
 #               Only supports horizon_m: 6 (the forward construction is horizon-specific).
 #
 # Decision rules the code applies mechanically:
-#   * PCA is promoted over z-score-average only if
+#   * All three methods (zscore_avg, ltm_0_5, pca_pc1) are scored on the COMMON
+#     sample (dates where the target AND all three predictors are non-NaN) —
+#     `results_common` in the output. `results_own` (each method's own max
+#     sample) is reported for context only and is NOT comparable across
+#     methods: PCA needs complete rows, so it starts later than z-avg/L-T-M,
+#     which tolerate missing indicators. Comparing own-sample OOS R^2s head to
+#     head is apples-to-oranges and can flash a false SIGNAL (see hand-off).
+#   * PCA is promoted over z-score-average only if, on the common sample,
 #       oos_r2(PCA) - oos_r2(z-avg) >= pca_promotion_margin
-#   * The composite is labelled SIGNAL only if oos_r2(production) >= signal_min_oos_r2;
-#     otherwise DESCRIPTIVE (a finding, not a failure).
+#   * The composite is labelled SIGNAL only if oos_r2(production) >= signal_min_oos_r2
+#     on the common sample; otherwise DESCRIPTIVE (a finding, not a failure).
+#   * UNDERPOWERED overrides both: if the common sample has fewer than
+#     min_common_oos observations, the run refuses to label SIGNAL (or promote
+#     PCA) and just reports the numbers. A positive R^2 on a handful of points
+#     is not a signal, whatever the margin.
 # =============================================================================
 
 target: fedfunds_change      # policy-rate move over the horizon; NEVER the level
@@ -63,6 +74,18 @@ min_train_months: 120        # 10y training window. With market inputs excluded
                              # the composite runs from ~1990, so OOS testing
                              # starts ~2000 and spans dot-com / GFC / 2015-18 /
                              # COVID / 2022-23 — multiple full rate cycles.
+
+min_common_oos: 60           # Refuse to label SIGNAL/promote PCA below this many
+                             # common-sample observations -> UNDERPOWERED instead.
+                             # PCA needs complete rows across all composite inputs,
+                             # so it's usually the binding constraint on the common
+                             # sample (gated by the latest-starting indicator).
+
+# eval_start: 1990-01-01     # optional: restrict OOS scoring to dates on/after this
+                             # (also settable per-run via `validate --eval-start`).
+                             # Use to re-test a lead found on the full history against
+                             # a modern-regime-only window (pre-Volcker / pre-anchored
+                             # expectations can inflate the Fed-inflation link).
 
 # Drop market-implied inflation series so the test is "do FUNDAMENTALS forecast
 # the Fed?", not "do market prices forecast the Fed?" (the latter is near-

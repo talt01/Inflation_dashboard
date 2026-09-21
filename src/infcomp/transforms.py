@@ -11,15 +11,19 @@ def to_monthly(s: pd.Series, agg: str = "mean", native_freq: str | None = None) 
     """Collapse any frequency to month-end.
 
     daily -> mean (default) / last / rvol (annualised std of daily changes, bp)
-    monthly -> as is; quarterly -> kept at quarter-end then forward-filled 2 months
-    (the reading stays "current" until the next release).
+    monthly -> as is; quarterly -> kept at quarter-end then forward-filled 3 months
+    (the reading stays "current" until the next release; limit=3 covers a full
+    quarter so a single missing/late print doesn't leave a mid-history NaN hole).
+    Forward-fill only, never interpolation: holding the last *published* value
+    flat is exactly what was knowable in real time; interpolating between
+    quarter-ends would pull a future release into the interior months.
     """
     s = s.dropna().sort_index()
     f = (native_freq or "").upper()[:1]
     if f == "Q":
         q = s.resample("QE").last()
         idx = pd.date_range(q.index.min(), q.index.max() + pd.offsets.MonthEnd(2), freq="ME")
-        return q.reindex(idx).ffill(limit=2)
+        return q.reindex(idx).ffill(limit=3)
     if agg == "rvol":
         d = s.diff() * 100  # yield pct-pts -> bp
         return d.resample("ME").std() * np.sqrt(252)
