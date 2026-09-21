@@ -7,7 +7,7 @@ zscore:
   # DECISION NEEDED: series starting in the 1950s-60s carry the Great Inflation
   # in an expanding window, which drags recent z-scores toward "cool". A 240m
   # rolling window anchors to the post-1990s regime. Test both in validation.
-  window: null
+  window: 120
 composite:
   min_coverage: 0.6        # share of active indicators required to print a reading
   neutral_band: 0.5        # |z| below this -> grey/neutral in the grid
