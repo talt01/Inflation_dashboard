@@ -1,0 +1,74 @@
+# =============================================================================
+# PRE-COMMITTED VALIDATION GATE  (brief §2)   —   TARGET: Fed funds policy rate
+# =============================================================================
+# Fill EVERY field, then commit this file to git BEFORE running
+# `python -m infcomp validate`. The validator refuses to run while any field is
+# null and stamps this file's SHA-256 into the results, so the record shows the
+# thresholds existed before the numbers did.
+#
+# target options:
+#   fedfunds_change  change in the Fed funds effective rate over the next
+#                    `horizon_m` months (bp). Needs the tgt_fedfunds row in
+#                    series_map.yaml and the fedfunds_change branch in
+#                    validation.build_target() (both present).
+#   ust2_change      change in 2y UST yield (bp) — the tradeable market proxy
+#                    for the Fed path; already supported.
+#   be5_change / rate_vol — the other shipped targets.
+# metric options:
+#   oos_r2           Campbell-Thompson out-of-sample R^2 vs the benchmark
+#                     selected below.
+# benchmark options (what the OOS R^2 measures edge OVER):
+#   hist_mean   expanding historical mean of the target (Campbell-Thompson).
+#               Weak bar for a policy target — an inflation composite beats it
+#               almost mechanically via the Taylor rule.
+#   zero        random-walk "Fed does nothing" — a sanity check.
+#   market      curve-implied expected policy path (validation.market_policy_change,
+#               forward short rate minus spot short rate from DGS3MO/6MO/1). The
+#               edge test: does the composite beat what the curve already prices?
+#               Only supports horizon_m: 6 (the forward construction is horizon-specific).
+#
+# Decision rules the code applies mechanically:
+#   * PCA is promoted over z-score-average only if
+#       oos_r2(PCA) - oos_r2(z-avg) >= pca_promotion_margin
+#   * The composite is labelled SIGNAL only if oos_r2(production) >= signal_min_oos_r2;
+#     otherwise DESCRIPTIVE (a finding, not a failure).
+# =============================================================================
+
+target: fedfunds_change      # policy-rate move over the horizon; NEVER the level
+                             # (level is near-unit-root -> spuriously high R^2)
+horizon_m: 6                 # 3m: Fed telegraphs it / already priced. 12m: sample
+                             # collapses via overlap. 6m = Fed has responded to
+                             # the inflation read, sample still usable.
+metric: oos_r2
+
+benchmark: market            # hist_mean | zero | market
+                             # market = beat the curve-implied Fed path (the edge test).
+                             # Against market, low/negative OOS R^2 is the likely and
+                             # honest outcome (the curve prices the 6m Fed path fairly
+                             # efficiently) — that's a finding, not a failure.
+
+pca_promotion_margin: 0.02   # PCA must add >= 2pp OOS R^2 to justify its
+                             # instability (loadings flip as data is added);
+                             # otherwise it stays a diagnostic, per the brief.
+
+signal_min_oos_r2: 0.02      # Set for the `market` benchmark: beating the curve is
+                             # genuinely hard, so a small positive margin here IS a
+                             # real signal. If you switch benchmark back to hist_mean,
+                             # raise this to ~0.10 — an inflation composite beats
+                             # "predict the average rate change" almost mechanically
+                             # (Taylor-rule reaction function), so a small positive R^2
+                             # there is NOT edge.
+
+min_train_months: 120        # 10y training window. With market inputs excluded
+                             # the composite runs from ~1990, so OOS testing
+                             # starts ~2000 and spans dot-com / GFC / 2015-18 /
+                             # COVID / 2022-23 — multiple full rate cycles.
+
+# Drop market-implied inflation series so the test is "do FUNDAMENTALS forecast
+# the Fed?", not "do market prices forecast the Fed?" (the latter is near-
+# tautological and undercuts the edge you actually claim). Also lengthens the
+# usable history back to ~1990.
+exclude_inputs: [be_5y, be_5y5y]
+
+committed_on: 2026-09-21
+committed_by: Tim

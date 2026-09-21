@@ -1,0 +1,120 @@
+# =============================================================================
+# US Inflation Composite — CANDIDATE series map
+# =============================================================================
+# EVERY `series_id` below is a CANDIDATE, not truth. None has been verified
+# against the live FRED API. Run `python -m infcomp verify` first: it queries
+# FRED, checks the returned title against `expect_title`, and writes
+# config/series_map_verified.csv. Nothing enters the composite until that file
+# shows status == VERIFIED **and** you set confirmed == TRUE by hand.
+#
+# Fields
+#   source       fred | file (free, off-FRED, drop CSV in data/manual/) | proprietary
+#   transform    auto | yoy | ann3m | level
+#                auto = decided from the verified FRED `units` string:
+#                  "Index..."                       -> yoy
+#                  "Percent Change at Annual Rate"  -> 12m mean of monthly annualised
+#                  "Percent Change from Year Ago"   -> as published
+#                  "Percent" (rates, breakevens)    -> level
+#   sign         +1 means a higher value = hotter inflation (all current rows are +1)
+#   role         core        realised-inflation backbone
+#                orthogonal  axes the HSBC set lacks (market-implied, wages)
+#                target      validation target only, never a composite input
+#                benchmark   validation benchmark-curve input only; routed to its
+#                            own bucket in data.build_panel, never a composite input
+#   agg          optional daily->monthly aggregation: mean (default) | last | rvol
+#                (rvol = annualised std of daily changes within the month, in bp)
+#   pub_lag_m    months between reference period and release; used to shift
+#                series for point-in-time alignment in validation
+#   expect_title case-insensitive substrings that must ALL appear in the FRED title
+# =============================================================================
+
+indicators:
+
+  # ---------------------------------------------------------------- headline / core
+  - {key: cpi_headline,  name: "CPI (headline)",        source: fred, series_id: CPIAUCSL,  transform: auto, sign: 1, role: core, group: headline, pub_lag_m: 1,
+     expect_title: ["consumer price index", "all items"]}
+  - {key: cpi_core,      name: "Core CPI",              source: fred, series_id: CPILFESL,  transform: auto, sign: 1, role: core, group: headline, pub_lag_m: 1,
+     expect_title: ["consumer price index", "less food and energy"]}
+  - {key: pce_headline,  name: "PCE price index",       source: fred, series_id: PCEPI,     transform: auto, sign: 1, role: core, group: headline, pub_lag_m: 1,
+     expect_title: ["personal consumption expenditures", "price index"]}
+  - {key: pce_core,      name: "Core PCE",              source: fred, series_id: PCEPILFE,  transform: auto, sign: 1, role: core, group: headline, pub_lag_m: 1,
+     expect_title: ["personal consumption expenditures", "excluding food and energy"]}
+
+  # ---------------------------------------------------------------- pipeline
+  - {key: ppi_fd,        name: "PPI final demand",      source: fred, series_id: PPIFID,    transform: auto, sign: 1, role: core, group: pipeline, pub_lag_m: 1,
+     expect_title: ["producer price index", "final demand"]}
+  - {key: import_px,     name: "Import price index",    source: fred, series_id: IR,        transform: auto, sign: 1, role: core, group: pipeline, pub_lag_m: 1,
+     expect_title: ["import price index"]}
+
+  # ---------------------------------------------------------------- underlying / trimmed
+  - {key: cle_median,    name: "Cleveland Fed median CPI",       source: fred, series_id: MEDCPIM158SFRBCLE,     transform: auto, sign: 1, role: core, group: underlying, pub_lag_m: 1,
+     expect_title: ["median"]}
+  - {key: cle_trimmed,   name: "Cleveland Fed 16% trimmed-mean CPI", source: fred, series_id: TRMMEANCPIM158SFRBCLE, transform: auto, sign: 1, role: core, group: underlying, pub_lag_m: 1,
+     expect_title: ["trimmed"]}
+  - {key: atl_sticky,    name: "Atlanta Fed sticky-price core CPI", source: fred, series_id: CORESTICKM159SFRBATL, transform: auto, sign: 1, role: core, group: underlying, pub_lag_m: 1,
+     expect_title: ["sticky"]}
+
+  # ---------------------------------------------------------------- CPI components
+  - {key: cpi_core_goods, name: "CPI core goods",       source: fred, series_id: CUSR0000SACL1E, transform: auto, sign: 1, role: core, group: components, pub_lag_m: 1,
+     expect_title: ["commodities less food and energy"]}
+  - {key: cpi_services_xe, name: "CPI services ex energy", source: fred, series_id: CUSR0000SASLE, transform: auto, sign: 1, role: core, group: components, pub_lag_m: 1,
+     expect_title: ["services less energy"]}
+  - {key: cpi_shelter,   name: "CPI shelter",           source: fred, series_id: CUSR0000SAH1, transform: auto, sign: 1, role: core, group: components, pub_lag_m: 1,
+     expect_title: ["shelter"]}
+  - {key: cpi_food,      name: "CPI food",              source: fred, series_id: CPIUFDSL,   transform: auto, sign: 1, role: core, group: components, pub_lag_m: 1,
+     expect_title: ["food"]}
+  - {key: cpi_recreation, name: "CPI recreation",       source: fred, series_id: CPIRECSL,   transform: auto, sign: 1, role: core, group: components, pub_lag_m: 1,
+     expect_title: ["recreation"]}
+  # NOTE: this is "services less rent of shelter", NOT true supercore (it still
+  # contains energy services). True supercore needs BLS relative-importance
+  # weights, which are not on FRED. Kept as a proxy until you decide.
+  - {key: cpi_svc_x_rent, name: "CPI services ex rent of shelter (supercore proxy)", source: fred, series_id: CUSR0000SASL2RS, transform: auto, sign: 1, role: core, group: components, pub_lag_m: 1,
+     expect_title: ["services less rent of shelter"]}
+
+  # ---------------------------------------------------------------- expectations (survey)
+  - {key: umich_1y,      name: "UMich 1y inflation expectations", source: fred, series_id: MICH, transform: auto, sign: 1, role: core, group: expectations, pub_lag_m: 0,
+     expect_title: ["michigan", "inflation expectation"]}
+  - {key: nyfed_sce_1y,  name: "NY Fed SCE 1y expectations", source: file, transform: level, sign: 1, role: core, group: expectations, pub_lag_m: 1}
+  - {key: nyfed_sce_3y,  name: "NY Fed SCE 3y expectations", source: file, transform: level, sign: 1, role: core, group: expectations, pub_lag_m: 1}
+
+  # ---------------------------------------------------------------- SF Fed decomposition (off-FRED)
+  - {key: sf_cyclical,   name: "SF Fed cyclical core PCE",  source: file, transform: level, sign: 1, role: core, group: decomposition, pub_lag_m: 1}
+  - {key: sf_acyclical,  name: "SF Fed acyclical core PCE", source: file, transform: level, sign: 1, role: core, group: decomposition, pub_lag_m: 1}
+
+  # ---------------------------------------------------------------- orthogonal axes
+  - {key: be_5y,         name: "5y breakeven",          source: fred, series_id: T5YIE,  transform: level, sign: 1, role: orthogonal, group: market, pub_lag_m: 0,
+     expect_title: ["breakeven", "5-year"]}
+  - {key: be_5y5y,       name: "5y5y forward inflation", source: fred, series_id: T5YIFR, transform: level, sign: 1, role: orthogonal, group: market, pub_lag_m: 0,
+     expect_title: ["forward inflation"]}
+  - {key: eci_total,     name: "ECI total compensation", source: fred, series_id: ECIALLCIV, transform: auto, sign: 1, role: orthogonal, group: wages, pub_lag_m: 1,
+     expect_title: ["employment cost index"]}
+  - {key: atl_wage,      name: "Atlanta Fed wage tracker", source: file, transform: level, sign: 1, role: orthogonal, group: wages, pub_lag_m: 1}
+
+  # ---------------------------------------------------------------- proprietary (excluded unless you supply a CSV)
+  - {key: ism_prices,    name: "ISM prices paid",       source: proprietary, transform: level, sign: 1, role: core, group: pipeline, pub_lag_m: 0}
+  - {key: cb_expect_12m, name: "Conf. Board 12m expectations", source: proprietary, transform: level, sign: 1, role: core, group: expectations, pub_lag_m: 0}
+  - {key: truflation,    name: "Truflation",            source: proprietary, transform: level, sign: 1, role: core, group: market, pub_lag_m: 0}
+
+  # ---------------------------------------------------------------- validation targets (never inputs)
+  - {key: tgt_be5,       name: "5y breakeven (target)", source: fred, series_id: T5YIE, transform: level, sign: 1, role: target, group: target, pub_lag_m: 0,
+     expect_title: ["breakeven", "5-year"]}
+  - {key: tgt_ust2,      name: "2y UST yield (Fed-path proxy)", source: fred, series_id: DGS2, transform: level, sign: 1, role: target, group: target, pub_lag_m: 0,
+     expect_title: ["2-year"]}
+  - {key: tgt_ust10,     name: "10y UST yield (for realised rate vol)", source: fred, series_id: DGS10, transform: level, agg: rvol, sign: 1, role: target, group: target, pub_lag_m: 0,
+     expect_title: ["10-year"]}
+  - {key: tgt_fedfunds,  name: "Fed funds effective rate (target)", source: fred, series_id: FEDFUNDS, transform: level, sign: 1, role: target, group: target, pub_lag_m: 0,
+     expect_title: ["federal funds effective rate"]}
+
+  # ---------------------------------------------------------------- benchmark curve (market-implied Fed path)
+  # role: benchmark keeps these OUT of the composite (routed separately in data.build_panel).
+  # Used by validation.market_policy_change() to build the curve-implied expected policy
+  # move — the "beat the market" OOS R^2 benchmark (config/gate.yaml: benchmark: market).
+  - {key: bmk_dgs3mo,    name: "3M Treasury (benchmark)",  source: fred, series_id: DGS3MO,
+     transform: level, sign: 1, role: benchmark, group: benchmark, pub_lag_m: 0,
+     expect_title: ["3-month", "treasury"]}
+  - {key: bmk_dgs6mo,    name: "6M Treasury (benchmark)",  source: fred, series_id: DGS6MO,
+     transform: level, sign: 1, role: benchmark, group: benchmark, pub_lag_m: 0,
+     expect_title: ["6-month", "treasury"]}
+  - {key: bmk_dgs1,      name: "1Y Treasury (benchmark)",  source: fred, series_id: DGS1,
+     transform: level, sign: 1, role: benchmark, group: benchmark, pub_lag_m: 0,
+     expect_title: ["1-year", "treasury"]}

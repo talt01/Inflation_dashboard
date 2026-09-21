@@ -1,0 +1,16 @@
+[project]
+name = "infcomp"
+version = "0.1.0"
+description = "US inflation composite dashboard — reference domain for the LCAM macro regime engine"
+requires-python = ">=3.10"
+dependencies = ["pandas>=2.0", "numpy", "matplotlib", "pyyaml", "requests"]
+
+[project.optional-dependencies]
+app = ["streamlit"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

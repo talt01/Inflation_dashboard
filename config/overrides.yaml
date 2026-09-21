@@ -1,0 +1,6 @@
+# Model advises, human adjusts (carried from Heatmap_indicators_v10 column T).
+# One entry per as-of month. Clamped to +/-1.25 on the 0-5 L/T/M scale and shown
+# as its own labelled column; it never silently alters the model score.
+# The z-score composite is NOT adjusted; the override applies to the 0-5 view.
+adjustments: []
+#  - {as_of: 2026-08-31, value: -0.50, author: Tim, reason: "Shelter lag overstating core; OER turning"}

@@ -1,0 +1,27 @@
+# Parameters that are CHOICES, not validated facts. Each one is a knob the
+# validation step should be able to stress; none should be read as calibrated.
+zscore:
+  min_periods: 60          # months of history before a z-score is produced
+  clip: 4.0
+  # null = expanding history (all data to date); integer = rolling months.
+  # DECISION NEEDED: series starting in the 1950s-60s carry the Great Inflation
+  # in an expanding window, which drags recent z-scores toward "cool". A 240m
+  # rolling window anchors to the post-1990s regime. Test both in validation.
+  window: null
+composite:
+  min_coverage: 0.6        # share of active indicators required to print a reading
+  neutral_band: 0.5        # |z| below this -> grey/neutral in the grid
+diffusion:
+  lookback_m: 3            # breadth = share of indicators whose z rose over this window
+ltm:                       # 0-5 cross-check; ALIGN these with Heatmap_indicators_v10 formulas
+  trend_m: 12
+  momentum_m: 3
+diagnostics:
+  duplicate_corr: 0.90     # |corr| above this flags a near-duplicate pair
+regime_hook:
+  trajectory_band: 0.25    # 3m change in composite z beyond +/- this -> heating/cooling
+gauge:
+  needles_m: [3, 6, 9, 12] # needles show the composite reading this many months ago
+cache_dir: data/cache
+manual_dir: data/manual
+output_dir: outputs
