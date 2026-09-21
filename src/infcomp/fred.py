@@ -20,6 +20,9 @@ from pathlib import Path
 
 import pandas as pd
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()  # picks up FRED_API_KEY from a git-ignored .env at the repo root, if present
 
 BASE = "https://api.stlouisfed.org/fred"
 
@@ -33,7 +36,10 @@ class FredClient:
                  timeout: int = 30):
         self.api_key = api_key or os.environ.get("FRED_API_KEY")
         if not self.api_key:
-            raise FredError("Set FRED_API_KEY (free key: fredaccount.stlouisfed.org).")
+            raise FredError(
+                "FRED_API_KEY not set. Get a free key at fredaccount.stlouisfed.org, then "
+                "either `export FRED_API_KEY=...` or add it to a .env file at the repo root "
+                "(FRED_API_KEY=..., already git-ignored).")
         self.cache = Path(cache_dir)
         self.cache.mkdir(parents=True, exist_ok=True)
         self.timeout = timeout

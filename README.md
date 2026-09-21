@@ -21,7 +21,8 @@ data layer → transforms → redundancy diagnostic → z-score composite (+ 0�
 
 ```bash
 pip install -e ".[dev,app]"
-export FRED_API_KEY=...            # free key
+export FRED_API_KEY=...            # free key: fredaccount.stlouisfed.org
+# or: cp .env.example .env && edit .env  (git-ignored; loaded automatically via load_dotenv)
 python -m infcomp demo             # synthetic smoke test, watermarked — no FRED needed
 python -m infcomp verify           # writes config/series_map_verified.csv
 #   -> review every row; set confirmed=TRUE on the ones you accept
