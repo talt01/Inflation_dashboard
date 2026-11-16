@@ -1,18 +1,23 @@
 """Task 1: build the verified series map.
 
 For every `source: fred` row, query FRED live and record what the ID actually
-resolves to. Status logic:
+resolves to. For every `source: url` row, fetch the hosted spreadsheet live and
+record whether the configured date/value columns were actually found. Status
+logic:
 
-  VERIFIED      ID exists AND every `expect_title` substring appears in the title
-  MISMATCH      ID exists but the title does not match -> almost certainly the
-                wrong series; human review required, excluded from composite
-  UNVERIFIED    ID not found on FRED (or call failed); excluded
-  OFF_FRED      free source loaded from data/manual/<key>.csv
+  VERIFIED      FRED ID exists AND every `expect_title` substring appears in the title
+  MISMATCH      FRED ID exists but the title does not match -> almost certainly
+                the wrong series; human review required, excluded from composite
+  UNVERIFIED    FRED ID not found (or call failed); OR a `url` source's fetch/parse
+                failed, or date_col/value_col weren't in the sheet -> excluded
+  OFF_FRED      free source: `file` loaded from data/manual/<key>.csv, or `url`
+                fetched live from the publisher's spreadsheet each run
   PROPRIETARY   ISM / Conference Board / Truflation; excluded unless supplied
 
 A VERIFIED row still needs you to set `confirmed` = TRUE in the output CSV
 after eyeballing title/units/frequency. The composite reads only rows that are
-VERIFIED + confirmed (or OFF_FRED/PROPRIETARY with a CSV present + confirmed).
+VERIFIED + confirmed, OFF_FRED(file) with a CSV present + confirmed, OFF_FRED(url)
++ confirmed, or PROPRIETARY with a CSV present + confirmed.
 """
 from __future__ import annotations
 
@@ -21,6 +26,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from .external import ExternalFetchError, fetch_xlsx_series
 from .fred import FredError
 
 COLUMNS = ["key", "indicator", "source", "series_id", "title", "frequency",
@@ -85,6 +91,17 @@ def verify(client, map_path="config/series_map.yaml", manual_dir="data/manual",
                     r["note"] = (r["note"] or "") + " transform unresolved from units"
             except (FredError, Exception) as e:  # noqa: BLE001  (network, 4xx, parse)
                 r.update(status="UNVERIFIED", note=str(e)[:160])
+        elif ind["source"] == "url":
+            r["resolved_transform"] = ind["transform"]  # no FRED units string to resolve `auto` from
+            try:
+                s = fetch_xlsx_series(ind["url"], ind["date_col"], ind["value_col"],
+                                      sheet=ind.get("sheet", 0), skiprows=ind.get("skiprows", 0))
+                r.update(status="OFF_FRED", frequency="Monthly",
+                         history_start=str(s.index.min().date()),
+                         last_obs=str(s.index.max().date()),
+                         note=f"fetched {len(s)} obs from {ind['url']}")
+            except ExternalFetchError as e:
+                r.update(status="UNVERIFIED", note=str(e)[:300])
         else:
             csv = Path(manual_dir) / f"{ind['key']}.csv"
             r["status"] = "OFF_FRED" if ind["source"] == "file" else "PROPRIETARY"
@@ -101,10 +118,15 @@ def verify(client, map_path="config/series_map.yaml", manual_dir="data/manual",
 
 
 def active_rows(verified: pd.DataFrame, manual_dir="data/manual") -> pd.DataFrame:
-    """Rows allowed into the model: verified/confirmed, or confirmed file with CSV."""
+    """Rows allowed into the model: verified FRED, confirmed file with a CSV
+    present, confirmed url (fetched live, no local file needed), or confirmed
+    proprietary with a CSV present."""
     v = verified.copy()
     v["confirmed"] = v["confirmed"].astype(str).str.upper() == "TRUE"
-    fred_ok = (v["status"] == "VERIFIED") & v["confirmed"]
-    file_ok = v["status"].isin(["OFF_FRED", "PROPRIETARY"]) & v["confirmed"] & \
+    fred_ok = (v["status"] == "VERIFIED") & v["confirmed"] & (v["source"] == "fred")
+    file_ok = (v["status"] == "OFF_FRED") & v["confirmed"] & (v["source"] == "file") & \
         v["key"].map(lambda k: (Path(manual_dir) / f"{k}.csv").exists())
-    return v[fred_ok | file_ok]
+    url_ok = (v["status"] == "OFF_FRED") & v["confirmed"] & (v["source"] == "url")
+    proprietary_ok = (v["status"] == "PROPRIETARY") & v["confirmed"] & \
+        v["key"].map(lambda k: (Path(manual_dir) / f"{k}.csv").exists())
+    return v[fred_ok | file_ok | url_ok | proprietary_ok]

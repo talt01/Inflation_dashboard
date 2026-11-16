@@ -50,5 +50,11 @@ pytest -q
 2. **Gate values** — target, horizon, PCA margin, signal threshold.
 3. **Supercore** — shipped as *CPI services ex rent of shelter* proxy (still contains energy services). True supercore needs BLS relative-importance weights.
 4. **0–5 L/T/M formulas** — expanding-percentile buckets here; align with `Heatmap_indicators_v10` before comparing like-for-like.
-5. **Proprietary holdouts** (ISM prices, Conference Board, Truflation) — excluded unless you supply a CSV.
-6. **Off-FRED sources** (SF Fed decomposition, NY Fed SCE, Atlanta wage tracker) are file loaders; their URLs weren't verifiable here, so no scrapers were written.
+5. **Proprietary holdouts** (Conference Board, Truflation) — excluded unless you supply a CSV.
+6. **Off-FRED sources** — NY Fed SCE is a `file` loader (manual CSV drop); the SF Fed cyclical/acyclical
+   core PCE decomposition and the NY Fed Global Supply Chain Pressure Index are `url` sources
+   (auto-fetched live from the publisher's `.xlsx` every run, no local cache — see
+   `config/series_map.yaml`'s field docs and `src/infcomp/external.py`). Their `date_col`/`value_col`
+   are CANDIDATES, same as a FRED series_id: neither host was reachable from the build sandbox, so
+   `verify` hasn't confirmed the actual column names yet — it will fail loudly with the real sheet's
+   columns if they're wrong.

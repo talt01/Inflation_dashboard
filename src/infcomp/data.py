@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from . import transforms as T
+from .external import fetch_xlsx_series
 from .verify import active_rows, load_map
 
 
@@ -33,6 +34,10 @@ def build_panel(client, verified: pd.DataFrame, map_path="config/series_map.yaml
         d = spec[row["key"]]
         if row["source"] == "fred":
             raw = client.observations(row["series_id"], realtime_end=realtime_end)
+        elif row["source"] == "url":
+            # fetched live every run, no local cache -> never silently serves a stale read
+            raw = fetch_xlsx_series(d["url"], d["date_col"], d["value_col"],
+                                    sheet=d.get("sheet", 0), skiprows=d.get("skiprows", 0))
         else:
             raw = _load_manual(row["key"], manual_dir)
         freq = (row.get("frequency") or "Monthly")

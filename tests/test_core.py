@@ -4,6 +4,7 @@ import pytest
 import yaml
 
 from infcomp import composite as C, data as D, transforms as T, validation as V, synthetic
+from infcomp import external as E
 from infcomp.verify import resolve_transform, verify
 
 
@@ -302,3 +303,109 @@ def test_validation_market_benchmark_requires_benchmarks_frame(tmp_path):
     s = yaml.safe_load(open("config/settings.yaml"))
     with pytest.raises(ValueError):
         V.run(inp, tgt, s, gate_path=g)  # benchmarks=None
+
+
+# --------------------------------------------------------------- url-sourced fetchers
+
+class _FakeResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+
+    def raise_for_status(self):
+        pass
+
+
+def _xlsx_bytes(df: pd.DataFrame, sheet_name="Sheet1") -> bytes:
+    import io
+    buf = io.BytesIO()
+    df.to_excel(buf, sheet_name=sheet_name, index=False)
+    return buf.getvalue()
+
+
+def test_fetch_xlsx_series_happy_path(monkeypatch):
+    df = pd.DataFrame({"Date": pd.date_range("2020-01-31", periods=5, freq="ME"),
+                       "GSCPI": [0.1, 0.2, -0.1, 0.3, 0.0]})
+    monkeypatch.setattr(E.requests, "get",
+                        lambda url, timeout=30: _FakeResponse(_xlsx_bytes(df, "GSCPI Monthly Data")))
+    s = E.fetch_xlsx_series("http://example.test/x.xlsx", "Date", "GSCPI",
+                            sheet="GSCPI Monthly Data")
+    assert len(s) == 5
+    assert s.name == "GSCPI"
+    assert s.index.is_monotonic_increasing
+
+
+def test_fetch_xlsx_series_missing_column_lists_actual_columns(monkeypatch):
+    df = pd.DataFrame({"Date": pd.date_range("2020-01-31", periods=3, freq="ME"),
+                       "Value": [1.0, 2.0, 3.0]})
+    monkeypatch.setattr(E.requests, "get", lambda url, timeout=30: _FakeResponse(_xlsx_bytes(df)))
+    with pytest.raises(E.ExternalFetchError, match=r"\['GSCPI'\].*\['Date', 'Value'\]"):
+        E.fetch_xlsx_series("http://example.test/x.xlsx", "Date", "GSCPI")
+
+
+def test_fetch_xlsx_series_network_failure(monkeypatch):
+    import requests as _requests
+
+    def _raise(url, timeout=30):
+        raise _requests.ConnectionError("boom")
+    monkeypatch.setattr(E.requests, "get", _raise)
+    with pytest.raises(E.ExternalFetchError, match="boom"):
+        E.fetch_xlsx_series("http://example.test/x.xlsx", "Date", "Value")
+
+
+def test_verify_url_source_success_and_failure(tmp_path, monkeypatch):
+    m = tmp_path / "map.yaml"
+    m.write_text(yaml.safe_dump({"indicators": [
+        {"key": "good_url", "name": "Good URL", "source": "url", "transform": "level",
+         "sign": 1, "role": "core", "group": "g",
+         "url": "http://example.test/good.xlsx", "date_col": "Date", "value_col": "V"},
+        {"key": "bad_url", "name": "Bad URL", "source": "url", "transform": "level",
+         "sign": 1, "role": "core", "group": "g",
+         "url": "http://example.test/bad.xlsx", "date_col": "Date", "value_col": "Missing"},
+    ]}))
+    good_df = pd.DataFrame({"Date": pd.date_range("2020-01-31", periods=4, freq="ME"),
+                            "V": [1.0, 2.0, 3.0, 4.0]})
+
+    def fake_get(url, timeout=30):
+        if "good" in url:
+            return _FakeResponse(_xlsx_bytes(good_df))
+        return _FakeResponse(_xlsx_bytes(good_df))  # "Missing" col -> triggers the failure path
+    monkeypatch.setattr(E.requests, "get", fake_get)
+
+    df = verify(client=None, map_path=m, manual_dir=tmp_path).set_index("key")
+    assert df.loc["good_url", "status"] == "OFF_FRED"
+    assert "fetched 4 obs" in df.loc["good_url", "note"]
+    assert df.loc["bad_url", "status"] == "UNVERIFIED"
+    assert "Missing" in df.loc["bad_url", "note"]
+    assert not df["confirmed"].any()
+
+
+def test_active_rows_routes_url_source_without_requiring_local_csv(tmp_path):
+    verified = pd.DataFrame([
+        {"key": "url_a", "source": "url", "status": "OFF_FRED", "confirmed": True},
+        {"key": "file_b", "source": "file", "status": "OFF_FRED", "confirmed": True},
+    ])
+    from infcomp.verify import active_rows
+    act = active_rows(verified, manual_dir=tmp_path)  # no CSV written for either key
+    assert "url_a" in set(act["key"])      # url rows don't need a local CSV
+    assert "file_b" not in set(act["key"])  # file rows do
+
+
+def test_build_panel_fetches_url_source(tmp_path, monkeypatch):
+    idx = pd.date_range("2020-01-31", periods=6, freq="ME")
+    m = tmp_path / "map.yaml"
+    m.write_text(yaml.safe_dump({"indicators": [
+        {"key": "gscpi", "name": "GSCPI", "source": "url", "transform": "level", "sign": 1,
+         "role": "core", "group": "pipeline", "pub_lag_m": 0,
+         "url": "http://example.test/gscpi.xlsx", "sheet": "Data",
+         "date_col": "Date", "value_col": "GSCPI"},
+    ]}))
+    verified = pd.DataFrame([
+        {"key": "gscpi", "series_id": None, "source": "url", "status": "OFF_FRED",
+         "confirmed": True, "frequency": "Monthly", "resolved_transform": "level"},
+    ])
+    gscpi_df = pd.DataFrame({"Date": idx, "GSCPI": np.arange(6, dtype=float)})
+    monkeypatch.setattr(E.requests, "get",
+                        lambda url, timeout=30: _FakeResponse(_xlsx_bytes(gscpi_df, "Data")))
+    inputs, targets, benchmarks, meta = D.build_panel(None, verified, map_path=m, manual_dir=tmp_path)
+    assert list(inputs.columns) == ["gscpi"]
+    assert inputs["gscpi"].notna().sum() == 6

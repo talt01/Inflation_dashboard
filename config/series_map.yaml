@@ -8,13 +8,24 @@
 # shows status == VERIFIED **and** you set confirmed == TRUE by hand.
 #
 # Fields
-#   source       fred | file (free, off-FRED, drop CSV in data/manual/) | proprietary
+#   source       fred | file (free, off-FRED, drop CSV in data/manual/) |
+#                url (free, off-FRED, auto-fetched from a hosted .xlsx every run —
+#                     no local cache, so it never silently serves a stale read) |
+#                proprietary
+#   url/date_col/value_col/sheet/skiprows   url rows only: the .xlsx location and
+#                which column holds the date/value (sheet/skiprows optional, default
+#                first sheet / 0). Column names here are CANDIDATES, same as a FRED
+#                series_id: `verify` fetches the real file and fails loudly, listing
+#                the sheet's actual columns, if date_col/value_col don't match.
 #   transform    auto | yoy | ann3m | level
 #                auto = decided from the verified FRED `units` string:
 #                  "Index..."                       -> yoy
 #                  "Percent Change at Annual Rate"  -> 12m mean of monthly annualised
 #                  "Percent Change from Year Ago"   -> as published
 #                  "Percent" (rates, breakevens)    -> level
+#                NEVER use auto for a url row (no FRED units string to resolve it
+#                from) or for a diffusion index misreported as "Index" units on FRED
+#                (YoY on a diffusion index is meaningless) — set transform explicitly.
 #   sign         +1 means a higher value = hotter inflation (all current rows are +1)
 #   role         core        realised-inflation backbone
 #                orthogonal  axes the HSBC set lacks (market-implied, wages)
@@ -26,6 +37,7 @@
 #   pub_lag_m    months between reference period and release; used to shift
 #                series for point-in-time alignment in validation
 #   expect_title case-insensitive substrings that must ALL appear in the FRED title
+#                (fred rows only)
 # =============================================================================
 
 indicators:
@@ -45,6 +57,19 @@ indicators:
      expect_title: ["producer price index", "final demand"]}
   - {key: import_px,     name: "Import price index",    source: fred, series_id: IR,        transform: auto, sign: 1, role: core, group: pipeline, pub_lag_m: 1,
      expect_title: ["import price index"]}
+  # Philly Fed Business Outlook Survey diffusion indices, replacing the proprietary
+  # ISM prices-paid row. transform is explicit `level`, NEVER `auto`: FRED may report
+  # a diffusion index's units as "Index", and auto would wrongly try YoY on it.
+  - {key: phl_prices_paid,    name: "Philly Fed prices paid",     source: fred, series_id: PPCDFSA066MSFRBPHI, transform: level, sign: 1, role: core, group: pipeline, pub_lag_m: 0,
+     expect_title: ["prices paid"]}
+  - {key: phl_prices_received, name: "Philly Fed prices received", source: fred, series_id: PRCDFSA066MSFRBPHI, transform: level, sign: 1, role: core, group: pipeline, pub_lag_m: 0,
+     expect_title: ["prices received"]}
+  # NY Fed Global Supply Chain Pressure Index — auto-fetched (source: url), not on FRED.
+  # Column names are CANDIDATES (see header): confirm against the real sheet via `verify`.
+  - {key: nyfed_gscpi,   name: "NY Fed Global Supply Chain Pressure Index", source: url,
+     url: "https://www.newyorkfed.org/medialibrary/research/interactives/gscpi/downloads/gscpi_data.xlsx",
+     sheet: "GSCPI Monthly Data", date_col: Date, value_col: GSCPI,
+     transform: level, sign: 1, role: core, group: pipeline, pub_lag_m: 0}
 
   # ---------------------------------------------------------------- underlying / trimmed
   - {key: cle_median,    name: "Cleveland Fed median CPI",       source: fred, series_id: MEDCPIM158SFRBCLE,     transform: auto, sign: 1, role: core, group: underlying, pub_lag_m: 1,
@@ -74,12 +99,19 @@ indicators:
   # ---------------------------------------------------------------- expectations (survey)
   - {key: umich_1y,      name: "UMich 1y inflation expectations", source: fred, series_id: MICH, transform: auto, sign: 1, role: core, group: expectations, pub_lag_m: 0,
      expect_title: ["michigan", "inflation expectation"]}
+  - {key: cle_expinf_1y, name: "1y expected inflation (model-based)", source: fred, series_id: EXPINF1YR, transform: auto, sign: 1, role: core, group: expectations, pub_lag_m: 0,
+     expect_title: ["expected inflation"]}
   - {key: nyfed_sce_1y,  name: "NY Fed SCE 1y expectations", source: file, transform: level, sign: 1, role: core, group: expectations, pub_lag_m: 1}
   - {key: nyfed_sce_3y,  name: "NY Fed SCE 3y expectations", source: file, transform: level, sign: 1, role: core, group: expectations, pub_lag_m: 1}
 
-  # ---------------------------------------------------------------- SF Fed decomposition (off-FRED)
-  - {key: sf_cyclical,   name: "SF Fed cyclical core PCE",  source: file, transform: level, sign: 1, role: core, group: decomposition, pub_lag_m: 1}
-  - {key: sf_acyclical,  name: "SF Fed acyclical core PCE", source: file, transform: level, sign: 1, role: core, group: decomposition, pub_lag_m: 1}
+  # ---------------------------------------------------------------- SF Fed decomposition (auto-fetched)
+  # Column names are CANDIDATES (see header): confirm against the real sheet via `verify`.
+  - {key: sf_cyclical,   name: "SF Fed cyclical core PCE",  source: url,
+     url: "https://www.frbsf.org/wp-content/uploads/cyclical-acyclical-core-pce-data.xlsx",
+     date_col: Date, value_col: Cyclical, transform: level, sign: 1, role: core, group: decomposition, pub_lag_m: 1}
+  - {key: sf_acyclical,  name: "SF Fed acyclical core PCE", source: url,
+     url: "https://www.frbsf.org/wp-content/uploads/cyclical-acyclical-core-pce-data.xlsx",
+     date_col: Date, value_col: Acyclical, transform: level, sign: 1, role: core, group: decomposition, pub_lag_m: 1}
 
   # ---------------------------------------------------------------- orthogonal axes
   - {key: be_5y,         name: "5y breakeven",          source: fred, series_id: T5YIE,  transform: level, sign: 1, role: orthogonal, group: market, pub_lag_m: 0,
@@ -88,10 +120,13 @@ indicators:
      expect_title: ["forward inflation"]}
   - {key: eci_total,     name: "ECI total compensation", source: fred, series_id: ECIALLCIV, transform: auto, sign: 1, role: orthogonal, group: wages, pub_lag_m: 1,
      expect_title: ["employment cost index"]}
-  - {key: atl_wage,      name: "Atlanta Fed wage tracker", source: file, transform: level, sign: 1, role: orthogonal, group: wages, pub_lag_m: 1}
+  - {key: atl_wage,      name: "Atlanta Fed wage tracker", source: fred, series_id: FRBATLWGT12MMAWMHWGO, transform: auto, sign: 1, role: orthogonal, group: wages, pub_lag_m: 1,
+     expect_title: ["wage growth"]}
+  # labor-market tightness -> leading indicator for wage pressure, same bucket as ECI/wage tracker
+  - {key: jolts_quits,   name: "JOLTS quits rate", source: fred, series_id: JTSQUR, transform: auto, sign: 1, role: orthogonal, group: wages, pub_lag_m: 2,
+     expect_title: ["quits"]}
 
   # ---------------------------------------------------------------- proprietary (excluded unless you supply a CSV)
-  - {key: ism_prices,    name: "ISM prices paid",       source: proprietary, transform: level, sign: 1, role: core, group: pipeline, pub_lag_m: 0}
   - {key: cb_expect_12m, name: "Conf. Board 12m expectations", source: proprietary, transform: level, sign: 1, role: core, group: expectations, pub_lag_m: 0}
   - {key: truflation,    name: "Truflation",            source: proprietary, transform: level, sign: 1, role: core, group: market, pub_lag_m: 0}
 
